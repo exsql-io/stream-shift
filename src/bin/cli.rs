@@ -2,9 +2,12 @@ use std::error::Error;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use futures::StreamExt;
 use rdkafka::admin::AdminClient;
 use rdkafka::config::FromClientConfig;
-use rdkafka::ClientConfig;
+use rdkafka::consumer::{Consumer, DefaultConsumerContext, StreamConsumer};
+use rdkafka::util::DefaultRuntime;
+use rdkafka::{ClientConfig, Message, TopicPartitionList};
 use tabled::settings::{Settings, Style};
 use tabled::{Table, Tabled};
 
@@ -30,6 +33,11 @@ enum Commands {
 #[derive(Subcommand)]
 enum TopicCommandActions {
     List {},
+    Tail {
+        name: String,
+        n: Option<usize>,
+        follow: Option<bool>,
+    },
 }
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -61,7 +69,35 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
 
                 let table_config = Settings::default().with(Style::psql());
-                println!("Topics: \n{}", Table::new(topics).with(table_config))
+                println!("Topics: \n{}", Table::new(topics).with(table_config));
+
+                drop(admin)
+            }
+            TopicCommandActions::Tail { name, n, follow } => {
+                let mut config = ClientConfig::new();
+                config.set("bootstrap.servers", cli.bootstrap_address);
+
+                let consumer =
+                    StreamConsumer::<DefaultConsumerContext, DefaultRuntime>::from_config(&config)?;
+
+                let mut topics = TopicPartitionList::new();
+                topics.add_topic_unassigned(name);
+
+                consumer.assign(&topics)?;
+
+                let result = async {
+                    let messages = consumer.stream().collect::<Vec<_>>().await;
+                    for message in messages {
+                        let message = message.unwrap();
+                        println!("key: {:?}, value: {:?}", message.key(), message.payload())
+                    }
+                };
+
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(result)
             }
         },
     }

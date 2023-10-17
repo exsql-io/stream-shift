@@ -17,3 +17,5 @@ path = "src/main.rs"
 clap = { version = "4.4.6", features = ["derive"] }
 rdkafka = { version = "0.34.0", features = ["cmake-build"] }
 tabled = "0.14.0"
+futures = "0.3.28"
+tokio = "1.33.0"
