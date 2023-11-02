@@ -22,7 +22,8 @@ pub mod consumer {
     use rdkafka::consumer::{BaseConsumer, Consumer};
     use rdkafka::error::KafkaResult;
     use rdkafka::message::BorrowedMessage;
-    use rdkafka::ClientConfig;
+    use rdkafka::Offset::Offset;
+    use rdkafka::{ClientConfig, TopicPartitionList};
     use uuid::Uuid;
 
     use crate::DEFAULT_TIMEOUT;
@@ -54,49 +55,50 @@ pub mod consumer {
             .fetch_metadata(Some(topic), DEFAULT_TIMEOUT)?;
 
         let partitions = metadata.topics()[0].partitions();
-        let end_offsets: HashMap<i32, i64> = partitions
+        let offsets: HashMap<i32, (i64, i64)> = partitions
             .iter()
             .map(|partition| {
                 (
                     partition.id(),
                     consumer
                         .fetch_watermarks(topic, partition.id(), DEFAULT_TIMEOUT)
-                        .unwrap()
-                        .1,
+                        .unwrap(),
                 )
             })
             .collect();
 
+        let mut assignment = TopicPartitionList::new();
+        for (partition, (offset, _)) in &offsets {
+            assignment.add_partition_offset(topic, *partition, Offset(*offset))?
+        }
+
+        consumer.assign(&assignment)?;
+
         Ok(ConsumeAllIterator {
             consumer,
             topic,
-            end_offsets,
+            offsets,
         })
     }
 
     struct ConsumeAllIterator<'a> {
         consumer: &'a BaseConsumer,
         topic: &'a str,
-        end_offsets: HashMap<i32, i64>,
+        offsets: HashMap<i32, (i64, i64)>,
     }
 
     impl<'a> ConsumeAllIterator<'a> {
         fn has_more(&self) -> bool {
-            let subscription = self.consumer.subscription().unwrap();
-            let topics = subscription.to_topic_map();
-            let mut at_end = true;
-            for ((topic, partition), offset) in topics {
-                if topic == self.topic {
-                    println!(
-                        "topic: {}, partition: {}, position: {:?}",
-                        topic, partition, offset
-                    );
+            let position = self.consumer.position().unwrap();
+            let partitions = position.elements_for_topic(self.topic);
 
-                    at_end = offset.to_raw().unwrap() == *self.end_offsets.get(&partition).unwrap()
-                }
+            let mut at_end = true;
+            for partition in partitions {
+                at_end = partition.offset().to_raw().unwrap()
+                    == self.offsets.get(&partition.partition()).unwrap().1
             }
 
-            at_end
+            !at_end
         }
     }
 
@@ -104,7 +106,7 @@ pub mod consumer {
         type Item = BorrowedMessage<'a>;
 
         fn next(&mut self) -> Option<Self::Item> {
-            let mut message = self.consumer.poll(Duration::from_secs(60));
+            let mut message = self.consumer.poll(Duration::from_millis(150));
             while message.is_none() && self.has_more() {
                 message = self.consumer.poll(Duration::from_millis(15));
             }
