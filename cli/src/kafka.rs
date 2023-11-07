@@ -14,19 +14,23 @@ pub mod admin {
             .create()
     }
 }
+
 pub mod consumer {
     use std::collections::HashMap;
     use std::error::Error;
     use std::time::Duration;
 
+    use iso8601_timestamp::Timestamp;
     use rdkafka::consumer::{BaseConsumer, Consumer};
     use rdkafka::error::KafkaResult;
     use rdkafka::message::BorrowedMessage;
-    use rdkafka::Offset::Offset;
+    use rdkafka::Offset;
     use rdkafka::{ClientConfig, TopicPartitionList};
     use uuid::Uuid;
 
     use crate::DEFAULT_TIMEOUT;
+
+    const INVALID_TOPIC_OFFSET: i64 = -1001;
 
     pub fn create_transient_consumer(bootstrap_address: String) -> KafkaResult<BaseConsumer> {
         let mut config = ClientConfig::new();
@@ -49,6 +53,8 @@ pub mod consumer {
     pub fn tail<'a>(
         consumer: &'a BaseConsumer,
         topic: &'a str,
+        limit: &Option<i64>,
+        since: &Option<Timestamp>,
     ) -> Result<impl Iterator<Item = BorrowedMessage<'a>>, Box<dyn Error>> {
         let metadata = consumer
             .client()
@@ -68,8 +74,37 @@ pub mod consumer {
             .collect();
 
         let mut assignment = TopicPartitionList::new();
-        for (partition, (offset, _)) in &offsets {
-            assignment.add_partition_offset(topic, *partition, Offset(*offset))?
+        match since {
+            None => {
+                for (partition, (start, end)) in &offsets {
+                    match limit {
+                        Some(limit) if end - start > *limit => assignment.add_partition_offset(
+                            topic,
+                            *partition,
+                            Offset::OffsetTail(*limit),
+                        )?,
+                        _ => assignment.add_partition_offset(
+                            topic,
+                            *partition,
+                            Offset::Offset(*start),
+                        )?,
+                    }
+                }
+            }
+            Some(ts) => {
+                for partition in offsets.keys() {
+                    assignment.add_partition_offset(
+                        topic,
+                        *partition,
+                        Offset::Offset(
+                            ts.duration_since(Timestamp::UNIX_EPOCH)
+                                .whole_milliseconds() as i64,
+                        ),
+                    )?
+                }
+
+                assignment = consumer.offsets_for_times(assignment, DEFAULT_TIMEOUT)?;
+            }
         }
 
         consumer.assign(&assignment)?;
@@ -94,8 +129,9 @@ pub mod consumer {
 
             let mut at_end = true;
             for partition in partitions {
-                at_end = partition.offset().to_raw().unwrap()
-                    == self.offsets.get(&partition.partition()).unwrap().1
+                let offset = partition.offset().to_raw().unwrap();
+                at_end = offset == INVALID_TOPIC_OFFSET
+                    || offset == self.offsets.get(&partition.partition()).unwrap().1
             }
 
             !at_end

@@ -1,9 +1,10 @@
 use std::error::Error;
 
+use clap::error::{ErrorKind, RichFormatter};
 use clap::{Parser, Subcommand};
 use itertools::Itertools;
 use k_board::{Keyboard, Keys};
-use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::consumer::BaseConsumer;
 use rdkafka::Message;
 use tabled::Tabled;
 
@@ -82,50 +83,53 @@ fn main() -> Result<(), Box<dyn Error>> {
                 limit,
                 follow,
             } => {
+                if since.is_some() && limit.is_some() {
+                    let err = clap::Error::raw(
+                        ErrorKind::InvalidValue,
+                        "Can't use both `since` and `limit` arguments.",
+                    );
+
+                    err.apply::<RichFormatter>().exit()
+                }
+
                 let consumer: BaseConsumer =
                     consumer::create_transient_consumer(cli.bootstrap_address)?;
 
                 let _follow = follow.unwrap_or(false);
-                match limit {
-                    Some(limit) => {
-                        consumer.subscribe(&[name])?;
+                let timestamp = match since {
+                    None => None,
+                    Some(value) => iso8601_timestamp::Timestamp::parse(value),
+                };
 
-                        let mut messages = Vec::new();
-                        for message in consumer::tail_limit(&consumer, *limit) {
-                            let key: &str = message.key_view().unwrap().unwrap();
-                            let value: &[u8] = message.payload().unwrap();
+                for chunk in consumer::tail(
+                    &consumer,
+                    name,
+                    &limit.map(|limit| limit as i64),
+                    &timestamp,
+                )?
+                .chunks(80)
+                .into_iter()
+                {
+                    let mut messages = Vec::new();
+                    for message in chunk {
+                        let key: &str = message.key_view().unwrap().unwrap();
+                        let value: &[u8] = message.payload().unwrap();
 
-                            messages.push(vec![
-                                key.to_string(),
-                                String::from_utf8_lossy(value).to_string(),
-                            ]);
-                        }
-                        println!("{}", console::render(TOPIC_TAIL_HEADERS.to_vec(), messages));
+                        messages.push(vec![
+                            key.to_string(),
+                            String::from_utf8_lossy(value).to_string(),
+                        ]);
                     }
-                    None => {
-                        for chunk in consumer::tail(&consumer, name)?.chunks(80).into_iter() {
-                            let mut messages = Vec::new();
-                            for message in chunk {
-                                let key: &str = message.key_view().unwrap().unwrap();
-                                let value: &[u8] = message.payload().unwrap();
 
-                                messages.push(vec![
-                                    key.to_string(),
-                                    String::from_utf8_lossy(value).to_string(),
-                                ]);
-                            }
+                    std::process::Command::new("clear").status().unwrap();
+                    println!("{}", console::render(TOPIC_TAIL_HEADERS.to_vec(), messages));
+                    print!(":");
 
-                            std::process::Command::new("clear").status().unwrap();
-                            println!("{}", console::render(TOPIC_TAIL_HEADERS.to_vec(), messages));
-                            print!(":");
-
-                            for key in Keyboard::new() {
-                                match key {
-                                    Keys::Enter => break,
-                                    Keys::Letter('q') | Keys::Letter('Q') => return Ok(()),
-                                    _ => {}
-                                }
-                            }
+                    for key in Keyboard::new() {
+                        match key {
+                            Keys::Enter => break,
+                            Keys::Letter('q') | Keys::Letter('Q') => return Ok(()),
+                            _ => {}
                         }
                     }
                 }
