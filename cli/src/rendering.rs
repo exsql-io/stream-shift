@@ -1,6 +1,13 @@
 pub mod console {
     use tabled::builder::Builder;
     use tabled::settings::{Settings, Style};
+    use tabled::Tabled;
+
+    #[derive(Tabled)]
+    pub struct TabledMessage {
+        key: String,
+        value: String,
+    }
 
     pub fn render(headers: Vec<&str>, rows: Vec<Vec<String>>) -> String {
         let mut builder = Builder::new();

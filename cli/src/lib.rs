@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+pub mod cli;
 pub mod kafka;
 pub mod rendering;
 
